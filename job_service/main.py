@@ -25,8 +25,8 @@ global_instance.modify_data("logger", logger)
 
 """
 Some starting up comments:
-> You have to run an instance of the celery worker in order for RabbitMQ pings from celery to work.
-  Also have to run the scheduler which is celery beat.
+> You may have to run an instance of the celery worker in order for RabbitMQ pings from celery to work.
+  Also have to run the scheduler which is celery beat. However, I should have done this programmatically
   This can be done by running (where tasks is tasks.py):
   'celery -A tasks worker --loglevel=INFO' -> Worker
   'celery -A celery_app beat --loglevel=info' -> Scheduler

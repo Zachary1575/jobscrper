@@ -50,7 +50,7 @@ def coreWorkday(df: DataFrame) -> None:
 
     return
 
-def workday_job_scraper_multithread(url: str, job_loss_rate_arr: list, historical_EMA_Predictions: list[int], actual_completion_times: list[int], logger) -> bool:
+def workday_job_scraper_multithread(url: str, job_loss_rate_arr, historical_EMA_Predictions, actual_completion_times, logger) -> bool:
     """
     DOC STRING
     """

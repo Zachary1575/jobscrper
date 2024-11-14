@@ -15,7 +15,7 @@ app.conf.update(
 # Celery Beat Configuration
 app.conf.beat_schedule = {
     'run-scheudled-time': {
-        'task': 'tasks.run_job_scraper',
+        'task': 'tasks.dummy_timed_task',
         'schedule': crontab(minute='*/10'),  # A pilot run is to run every 10 minutes
     },
 }
