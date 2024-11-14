@@ -1,0 +1,2 @@
+logger = None
+app = None

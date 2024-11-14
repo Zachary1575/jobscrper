@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "job-scraper"
+version = "0.1.0"
+description = ""
+authors = ["Zachary <75510412+Zachary1575@users.noreply.github.com>"]
+readme = "README.md"
+package-mode=false
+
+[tool.poetry.dependencies]
+python = "^3.8"
+loguru = "^0.7.2"
+mypy = "^1.11.2"
+celery = "^5.4.0"
+art = "^6.3"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
