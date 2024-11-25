@@ -1,13 +1,19 @@
 import time
 import math
 import hashlib
-import bootstrap_init
-from global_state import global_instance
+import pandas as pd
+from global_state import GlobalClass
 from pandas import DataFrame
+
+import redis
+from redis import Redis
 
 from util.utility import time_monitoring_task
 from util.utility import estimate_current_job_time # EMA time
 from util.utility import divide_pages_into_three_parts
+from util.utility import converTimeToNum
+from util.utility import extract_string
+from util.utility import redisDump
 
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -20,18 +26,21 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.common.exceptions import TimeoutException
 from selenium.webdriver.support import expected_conditions as EC
 
-def coreWorkday(df: DataFrame) -> None:
+def coreWorkday(df: DataFrame, process_data: GlobalClass, logger) -> None:
     """
     DOC STRING
     """
-    logger = bootstrap_init.logger
+    PROCESS_INSTANCE = process_data
+    LOGGER = logger
 
-    if (global_instance.get_data("chrome_options") == None):
+    if (process_data.get_data("chrome_options") == None):
         logger.error("Chrome Options for Selenium are not set! Aborting!")
         raise Exception("Chrome Options for Selenium are not set! Aborting!")
 
-    logger.info("Executing Workday Runner...")
-    logger.debug("Printing df...")
+    REDIS = redis.Redis(host='localhost', port=6379, db=0) # try catch needed here
+
+    LOGGER.info("Executing Workday Runner...")
+    LOGGER.debug("Printing df...")
     print(df)
 
     job_loss_rate_arr = []
@@ -46,15 +55,79 @@ def coreWorkday(df: DataFrame) -> None:
     workday_jobs["Job_ID"] = []
     workday_jobs["Job_Meta"] = []
 
-    global_instance.modify_data("worday_dict", workday_jobs)
+    PROCESS_INSTANCE.modify_data("workday_dict", workday_jobs) 
+
+    df_test = df[:3]
+    func = lambda x: workday_job_scraper_multithread(x, job_loss_rate_arr, historical_EMA_Predictions, actual_completion_times, REDIS, PROCESS_INSTANCE, LOGGER)
+    df_test["urls"].apply(func)
+    df_raw = pd.DataFrame(workday_jobs)
+    df_final = workday_post_processing(df_raw, LOGGER)
+
+    print(df_final)
+
+    if (len(df_final) != 0):
+            func2 = lambda x: redisDump(x.to_dict(), REDIS)
+            df_final.apply(func2, axis=1)
+    REDIS.close()
+
+    LOGGER.info("Stopping abit to Control + C")
+    time.sleep(100)
+    LOGGER.info("Moving on!")
 
     return
 
-def workday_job_scraper_multithread(url: str, job_loss_rate_arr, historical_EMA_Predictions, actual_completion_times, logger) -> bool:
+def workday_post_processing(df: DataFrame, LOGGER) -> DataFrame:
     """
     DOC STRING
     """
-    chrome_options = global_instance.get_data("chrome_options")
+    LOGGER.info("Running post-processing of job data...")
+    begin_count = len(df)
+    df["Job_Posted_Time"] = df["Job_Posted_Time"].apply(converTimeToNum)
+    df = df.dropna(subset=["Job_Posted_Time"])
+
+    df_sorted = df.sort_values(by='Job_Posted_Time')
+    df_sorted["Company"] = df_sorted["Job_Link"].apply(extract_string)
+    exclude_strings_titles = [
+        "Intern", "Internship", "Temporary", "Senior", 
+        "Lead", "Principal", "Staff", "Manager", "Director", 
+        "Head", "Chief", "Architect", "VP", "Vice President", 
+        "Manager", "Sr"
+    ]
+    pattern_titles = '|'.join(exclude_strings_titles)
+    df_filtered = df_sorted[~df_sorted['Job_Title'].str.contains(pattern_titles, na=False)] # Job Title Exclusion
+
+    exclude_strings_location = [
+        "Mexico", "India", "Poland", "Toronto", "Ireland", 
+        "Bangalore", "China", "Pune", "Singapore", "Bengaluru", 
+        "Israel", "Noida", "Manila", "Gurgaon", "Prague", 
+        "Cairo", "Seoul", "Mumbai", "Lund", "Madrid"
+    ]
+    pattern_locations = '|'.join(exclude_strings_location)
+    df_filtered = df_filtered[~df_filtered['Job_Location'].str.contains(pattern_locations, na=False)] # Job Location Exclusion
+    df_filtered = df_filtered[df_filtered['Job_Posted_Time'] < 7] # Cutting to jobs as old as a week
+    df_filtered = df_filtered.drop_duplicates(subset=['Job_Meta'], keep='first')
+
+    LOGGER.info(f"Filtered from {begin_count} jobs to {len(df_filtered)} jobs, excluding {begin_count - len(df_filtered)} jobs!")
+    LOGGER.info("Done!")
+    return df_filtered
+
+def workday_job_scraper_multithread(url: str, job_loss_rate_arr, historical_EMA_Predictions, actual_completion_times, REDIS: Redis, PROCESS_INSTANCE: GlobalClass, LOGGER) -> bool:
+    """
+    DOC STRING
+    """
+    def daemon_thread_factory():
+        """
+        Custom thread factory that creates daemon threads
+        """
+        thread = threading.Thread()
+        thread.daemon = True
+        return thread
+    
+    if (len(url.split("/")) >= 5 and "en-US" not in url):
+        LOGGER.info(f"Skipped link '{url}' due to job workday referring outside the U.S")
+        return True
+    
+    chrome_options = PROCESS_INSTANCE.get_data("chrome_options")
 
     start_time = time.time()
     estimated_time = estimate_current_job_time(historical_EMA_Predictions, actual_completion_times)
@@ -91,20 +164,23 @@ def workday_job_scraper_multithread(url: str, job_loss_rate_arr, historical_EMA_
     print(f"Estimated time for completion of longest running thread: {estimated_time}")
 
     if (total_pages < 3):
-        workday_job_scraper(url, 1, total_pages, ema_with_constant, logger)
+        workday_job_scraper(url, 1, total_pages, ema_with_constant, REDIS, PROCESS_INSTANCE, LOGGER)
     else:
         partition = divide_pages_into_three_parts(total_pages)
     
-        logger.info(f"Partitioning pages scheme per thread: {partition}")
-        logger.debug("Executing Threading!")
+        LOGGER.info(f"Partitioning pages scheme per thread: {partition}")
+        LOGGER.debug("Executing Threading!")
         
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="daemon_thread") as executor:
+            executor._threads = set()
+            executor._thread_factory = daemon_thread_factory
+
             jobs_to_scrape = [
                 (f"{url}", partition[0][0], partition[0][1], ema_with_constant),
                 (f"{url}", partition[1][0], partition[1][1], ema_with_constant),
                 (f"{url}", partition[2][0], partition[2][1], ema_with_constant)
             ]
-            futures = [executor.submit(workday_job_scraper, url, start, finish, duration, logger) for url, start, finish, duration in jobs_to_scrape]
+            futures = [executor.submit(workday_job_scraper, url, start, finish, duration, REDIS, PROCESS_INSTANCE, LOGGER) for url, start, finish, duration in jobs_to_scrape]
 
         overall_jobs_lost = 0
         for future in futures:
@@ -125,18 +201,18 @@ def workday_job_scraper_multithread(url: str, job_loss_rate_arr, historical_EMA_
     
     return True
 
-def workday_job_scraper(url, start, finish, duration, logger):
+def workday_job_scraper(url, start, finish, duration, REDIS: Redis, PROCESS_INSTANCE: GlobalClass, LOGGER):
     """
     DOC STRING
     """
-    workday_jobs = global_instance.get_data("workday_dict")
+    workday_jobs = PROCESS_INSTANCE.get_data("workday_dict")
 
     page = start
     prev_page = start
     stop_event = threading.Event()
     current_thread_name = threading.current_thread().name
     executor = ThreadPoolExecutor()
-    chrome_options = global_instance.get_data("chrome_options")
+    chrome_options = PROCESS_INSTANCE.get_data("chrome_options")
     
     terms = [
         "software", "developer", "data", ".Net", "C#", "C", "C++",
@@ -156,7 +232,7 @@ def workday_job_scraper(url, start, finish, duration, logger):
     # Then start scraping
     try:
         retries = 100
-        hash_set = set()
+        hash_set = set() 
         
         driver = webdriver.Chrome(options=chrome_options)
         driver.set_page_load_timeout(30)
@@ -177,12 +253,12 @@ def workday_job_scraper(url, start, finish, duration, logger):
             buttonA.click()
 
         if (stop_event.is_set()):
-            logger.error("Thread Timed out during Walk!")
+            LOGGER.error("Thread Timed out during Walk!")
             total_lost_jobs = (((finish - start) + 1) * 20)
             driver.quit()
             return total_lost_jobs
         else:  
-            logger.debug(f"[{current_thread_name}] Finished Walk!")
+            LOGGER.debug(f"[{current_thread_name}] Finished Walk!")
 
         retry_cnt = 0
         total_lost_jobs = 0
@@ -227,10 +303,10 @@ def workday_job_scraper(url, start, finish, duration, logger):
                     readableID = ""
                     for li in li_elements_id:
                         readableID += li.get_text()
-                    jobID = hashlib.sha256(readableID.encode())
+                    jobID = hashlib.sha256(readableID.encode()).hexdigest()
                         
                     term_found = False
-                    if (jobID not in hash_set):
+                    if (jobID not in hash_set and REDIS.exists(jobID) == 0): # Redis High Read Workload
                         for term in terms:
                             if term in job_title.lower():
                                 term_found = True
@@ -272,13 +348,13 @@ def workday_job_scraper(url, start, finish, duration, logger):
                 time.sleep(3)
                 
         if (retry_cnt == 10):
-            logger.error("Hit Max Retry Count!")
+            LOGGER.error("Hit Max Retry Count!")
             total_lost_jobs = (((finish - start) + 1) * 20)
         elif (stop_event.is_set()):
-            logger.error("Thread Timed out!")
+            LOGGER.error("Thread Timed out!")
             total_lost_jobs = (((finish - start) + 1) * 20)
         
-        logger.info(f"[{current_thread_name}] Total Jobs Lost: {total_lost_jobs}")
+        LOGGER.info(f"[{current_thread_name}] Total Jobs Lost: {total_lost_jobs}")
         driver.quit()
         stop_event.set()
         executor.shutdown(wait=True)
@@ -289,5 +365,5 @@ def workday_job_scraper(url, start, finish, duration, logger):
         total_lost_jobs = (((finish - start) + 1) * 20)
         print(f"[ERROR] {current_thread_name} ran into an error!")
         print(f"[ERROR] on page {page}!")
-        logger.exception(f"Error occcured for {url}")
+        LOGGER.exception(f"Error occcured for {url}")
         return total_lost_jobs

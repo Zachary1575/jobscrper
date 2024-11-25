@@ -1,8 +1,7 @@
 import bootstrap_init
-from global_state import global_instance
 from selenium.webdriver.chrome.options import Options
 
-def setChromeOptions():
+def setChromeOptions(global_instance):
     """
     Doc String
     """

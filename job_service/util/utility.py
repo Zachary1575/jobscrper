@@ -1,6 +1,54 @@
+import re
 import time
 import bootstrap_init
+from pandas import DataFrame
+from redis import Redis
+from redis.commands.json.path import Path
 
+def redisDump(x: dict, REDIS: Redis) -> None:
+    """
+    DOC STRING
+    """
+    json_payload = {
+        "job_title": x["Job_Title"],
+        "job_location": x["Job_Location"],
+        "job_posted_time": x["Job_Posted_Time"],
+        "job_link": x["Job_Link"],
+        "job_id": x["Job_ID"],
+        "job_meta": x["Job_Meta"],
+        "job_company": x["Company"]
+    }
+
+    REDIS.json().set(str(x["Job_ID"]), Path.root_path(), json_payload)
+    return
+
+
+def extract_string(url):
+    """
+    DOC STRING
+    """
+    # Find the substring between '//' and the first '/' after it
+    match = re.search(r'https?://([^./]+)\.', url)
+    if match:
+        return match.group(1)
+    return None
+
+def converTimeToNum(x):
+    """
+    DOC STRING
+    """
+    try:
+        if (x == "Posted Today"):
+            return 0
+        elif (x == "Posted Yesterday"):
+            return 1
+        num = x.split()[1]
+        if (num == "30+"):
+            return 30
+        return int(num)
+    except ValueError as e:
+        return None
+    
 def divide_pages_into_three_parts(total_pages):
     """
     DOC STRING

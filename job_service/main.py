@@ -5,13 +5,15 @@ from loguru import logger
 import multiprocessing
 
 from celery.apps.beat import Beat
+from celery.schedules import crontab
 
 # Custom Libs
 from celery_app import app
 from global_state import global_instance
+from global_state import GlobalClass
 from bootstrap_init.rabbitmq import verifyRabbitMQ
 from bootstrap_init.initalize import initBootstrap
-from bootstrap_init.chrome_options import setChromeOptions
+from bootstrap_init.mongo import fetchUniqueCompanyList
 
 """
 --LOGGER CONFIG--
@@ -30,6 +32,8 @@ Some starting up comments:
   This can be done by running (where tasks is tasks.py):
   'celery -A tasks worker --loglevel=INFO' -> Worker
   'celery -A celery_app beat --loglevel=info' -> Scheduler
+
+> Amongst Seperate Processes, there is no "Global" instance unless using shared memory explicitly.
 """
 def main() -> None:
     """
@@ -54,11 +58,11 @@ def main() -> None:
     initBootstrap()
     logger.info("Initializing Dependencies and Connections...")
     logger.info("Setting Chrome options for Selenium...")
-    setChromeOptions()
+    company_list = fetchUniqueCompanyList()
     logger.info("Verifying RabbitMQ Server is live...")
     verifyRabbitMQ("127.0.0.1", 5672) # Host and Port might change in Kubernetes
-    logger.info("Starting Celery Scheduler Thread! Executing Job Scraper!")
-    scheduler_process = multiprocessing.Process(target=start_celery_beat, name="CeleryBeat", daemon=True)
+    logger.info("Serializing Global Instance & Starting Celery Scheduler Thread!")
+    scheduler_process = multiprocessing.Process(target=start_celery_beat, args=(company_list,), name="CeleryBeat", daemon=True)
     scheduler_process.start()
     logger.info("Finished!")
 
@@ -80,15 +84,34 @@ def main() -> None:
         logger.info("Exiting Main Program!")
 
 def start_celery_worker():
-    """Start Celery Worker."""
+    """
+    Start Celery Worker.
+    """
     app.worker_main(['worker', '--loglevel=info'])
 
-def start_celery_beat():
-    """Start Celery Beat programmatically."""
+def start_celery_beat(company_list):
+    """
+    Start Celery Beat programmatically. 
+    """
+    beat_global_instance = GlobalClass("beat")
+    beat_global_instance.modify_data("company_urls", company_list)
+    global_instance_serialized = beat_global_instance.to_json()
+    app.conf.beat_schedule = {
+        'run-scheudled-time': {
+            'task': 'tasks.run_job_scraper',
+            'schedule': crontab(minute='*/1'),  # A pilot run is to run every 10 minutes
+            'args': [global_instance_serialized],
+        },
+    }
+    app.conf.timezone = 'UTC'
+
     beat = Beat(app=app)
     beat.run()
 
 def verify_worker(worker_process, logger):
+    """
+    DOC STRING
+    """
     logger.info("Verifying worker status with retries...")
     retries = 0
     max_retries = 10
